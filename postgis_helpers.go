@@ -1,9 +1,9 @@
 package tilenol
 
 import (
-	"database/sql"
 	"errors"
 
+	"github.com/jackc/pgx/v4"
 	"github.com/paulmach/orb/encoding/wkb"
 )
 
@@ -13,17 +13,15 @@ var (
 
 // RowsToMaps converts Go's sql.Rows data structure into a list of maps where the key is a string
 // column name, and the value is the raw SQL value
-func RowsToMaps(rows *sql.Rows, geomColumn string) ([]map[string]interface{}, error) {
+func RowsToMaps(rows pgx.Rows, geomColumn string) ([]map[string]interface{}, error) {
 	var maps []map[string]interface{}
 
-	cols, err := rows.Columns()
-	if err != nil {
-		return nil, err
-	}
+	fields := rows.FieldDescriptions()
 
 	for rows.Next() {
-		row := make([]interface{}, len(cols))
-		for idx, col := range cols {
+		row := make([]interface{}, len(fields))
+		for idx, field := range fields {
+			col := string(field.Name)
 			if col == geomColumn {
 				row[idx] = new(wkb.GeometryScanner)
 			} else {
@@ -35,7 +33,8 @@ func RowsToMaps(rows *sql.Rows, geomColumn string) ([]map[string]interface{}, er
 			return maps, err
 		}
 		m := make(map[string]interface{})
-		for idx, col := range cols {
+		for idx, field := range fields {
+			col := string(field.Name)
 			if geom, isGeomScanner := row[idx].(*wkb.GeometryScanner); isGeomScanner {
 				if geom.Valid {
 					m[col] = geom.Geometry

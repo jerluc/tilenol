@@ -2,7 +2,6 @@ package tilenol
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -10,8 +9,8 @@ import (
 
 	// SQL deps
 	"github.com/doug-martin/goqu/v9"
-	_ "github.com/doug-martin/goqu/v9/dialect/postgres"
-	_ "github.com/lib/pq"
+	"github.com/jackc/pgx/v4"
+	"github.com/jackc/pgx/v4/pgxpool"
 	// Geo deps
 	"github.com/paulmach/orb"
 	"github.com/paulmach/orb/geojson"
@@ -73,24 +72,24 @@ func (c *PostGISConfig) Dataset() (*goqu.SelectDataset, error) {
 // PostGISSource is a Source implementation that retrieves feature data from a
 // PostGIS server
 type PostGISSource struct {
-	DB            *goqu.Database
+	DB            *pgxpool.Pool
 	Dataset       *goqu.SelectDataset
 	GeometryField string
 	SourceFields  map[string]string
 }
 
 // CheckPing asserts that we can ping the connected database
-func CheckPing(db *sql.DB) error {
-	if connErr := db.Ping(); connErr != nil {
-		return connErr
-	}
+func CheckPing(db *pgxpool.Pool) error {
+	// if connErr := db.Ping(); connErr != nil {
+	// 	return connErr
+	// }
 	return nil
 }
 
 // CheckReadOnly warns if the current database connection is capable of read-write transactions
-func CheckReadOnly(db *sql.DB) error {
+func CheckReadOnly(db *pgxpool.Pool) error {
 	var readOnlyCheck string
-	row := db.QueryRow("SHOW transaction_read_only")
+	row := db.QueryRow(context.Background(), "SHOW transaction_read_only")
 	if err := row.Scan(&readOnlyCheck); err != nil {
 		return err
 	}
@@ -105,18 +104,18 @@ func CheckReadOnly(db *sql.DB) error {
 // PostGIS server
 func NewPostGISSource(config *PostGISConfig) (Source, error) {
 	// Open the database connection
-	pgDB, pgErr := sql.Open("postgres", config.DSN)
+	pgPool, pgErr := pgxpool.Connect(context.Background(), config.DSN)
 	if pgErr != nil {
 		return nil, pgErr
 	}
 
 	// Check to make sure we can ping the database
-	if err := CheckPing(pgDB); err != nil {
+	if err := CheckPing(pgPool); err != nil {
 		return nil, err
 	}
 
 	// Also check to see if we are using a read-only connection
-	if err := CheckReadOnly(pgDB); err != nil {
+	if err := CheckReadOnly(pgPool); err != nil {
 		return nil, err
 	}
 
@@ -127,7 +126,7 @@ func NewPostGISSource(config *PostGISConfig) (Source, error) {
 	}
 
 	return &PostGISSource{
-		DB:            goqu.Dialect("postgres").DB(pgDB),
+		DB:            pgPool,
 		Dataset:       dataset,
 		GeometryField: config.GeometryField,
 		SourceFields:  config.SourceFields,
@@ -196,7 +195,7 @@ func (p *PostGISSource) runQuery(ctx context.Context, q string) ([]map[string]in
 	defer qCancel()
 
 	// Use a read-only transaction to ensure that we can't execute write operations to the database
-	txOps := &sql.TxOptions{ReadOnly: true}
+	txOps := pgx.TxOptions{} // ReadOnly: true}
 	tx, err := p.DB.BeginTx(qCtx, txOps)
 	// Note that the database backend will rollback the transaction upon context cancellation.
 	if err != nil {
@@ -205,10 +204,13 @@ func (p *PostGISSource) runQuery(ctx context.Context, q string) ([]map[string]in
 
 	// Actually execute the query
 	Logger.Debugf("Executing SQL: %s\n", q)
-	rows, err := tx.Query(q)
+	start := time.Now()
+	rows, err := tx.Query(qCtx, q)
 	if err != nil {
 		return nil, err
 	}
+	dur := time.Since(start)
+	Logger.Printf("postgis-query: %s", dur)
 	defer rows.Close()
 
 	// Re-map the row objects to a list of map-like records
